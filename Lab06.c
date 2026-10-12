@@ -3,8 +3,8 @@
  *
  * Created: 10/4/2022 9:16:57 AM
  * Initial Coder: jfhutton
- * Current Coder: <TBD>
- * Modified:      <TBD>
+ * Current Coder: Brendan Novak
+ * Modified:      10/10/2026
  *
  * This lab uses hardware LEDs wired to PORTA, an interrupt from the joystick center
  * button, and a timer interrupt to build a game loop program that can display 
@@ -16,87 +16,138 @@
  *
  */ 
 
-#include <avr/io.h>              // Needed for AVR IO defines
-#include <avr/interrupt.h>       // Needed for AVR interupt devines
+#include <avr/io.h>             // Needed for AVR IO defines
+#include <avr/interrupt.h>      // Needed for AVR interrupt defines
 
-#define LEDS            PORTA    // alias PORTA
+#define LEDS                PORTA    // alias PORTA
 
-	
-// global variables for communication between ISRs and main
-const unsigned char TCNT0_COUNT_SET = 0x8E;// Count for 1ms loop (Provided by Prof Hutton)
-// <TBD> Your global variables should go here
+// Enumerate the possible LED flashing patterns
+enum patterns {
+    LowToHigh = 0,
+    HighToLow,
+    BackAndForth,
+    BonusPattern
+};
+
+// Global variables for communication between ISRs and main
+const unsigned char TCNT0_COUNT_SET = 0x8E; // Count for 1ms loop (Provided by Prof Hutton)
+volatile enum patterns Mode = LowToHigh;    // Current active pattern state
+volatile unsigned char Tick = 0;            // Millisecond tick counter incremented by Timer0 ISR
 
 int main(void){
-	// Variables for main
-	// <TBD> Your local main variables should go here
+	// Variables for main tracking
+	unsigned char current_led = 0;
+	signed char step_dir = 1;
+	enum patterns last_mode = LowToHigh;
 	
 	// State machine initialization.
 	
 	// Initialization for LEDs
 	// Set direction for A ports.
-	// (Prof Note:  This is similar to our two line assembly commands.)
-	
-	DDRA = 0xFF;  // Set the Direction for all PORTA pints to be outputs
-	LEDS = 0xFF;  // Set the PORTA for all pins to be high (i.e. OFF)
-	//LEDS = 0x00;  // TEST - Set all PORTA pins to be low (i.e. ON)
+	DDRA = 0xFF;  // Set the Direction for all PORTA pins to be outputs
+	LEDS = 0xFF;  // Set the PORTA for all pins to be high (i.e. OFF for active-low LEDs)
 	
 	// Initialization for Timer Interrupt
 	// With a 7.3MHz crystal we have a 0.137us period
-	// To build a 1ms timer "tick" we
-	// - set the pre-scaler to 1/64 (8.77us)
-	// - set the TCNT1 to count 114 counts (0-114=0x8E)
-	// - enable the interrupt on overflow
-	// (Prof Note: these are the commands you need, BUT they are commented
-	//  out to start.  Be sure you fully understand them (book, datasheet, etc)
-	//  before you enable them...  You also have to have the proper ISR routine
-	//  ready for this to work.)
-	// (Prof Note Two:  You will need to show your own calculations in the 
-	//  Lab Report to verify the TCNT0_COUNT_SET value!)
-	
-	//TCCR0 = (1<<CS02);
-	//TCNT0 = TCNT0_COUNT_SET;
-	//TIMSK = (1<<TOIE0);
+	// To build a 1ms timer "tick" we set prescaler to 1/64, TCNT0 = 0x8E, and enable overflow interrupt
+	TCCR0 = (1<<CS02);
+	TCNT0 = TCNT0_COUNT_SET;
+	TIMSK = (1<<TOIE0);
 	
 	// Port Initialization
-	// Using the LED PORTA initilization above and your Lab05 code, 
-	// Configure the joystick button.
-	// (Prof Note: you will need to add another jumper wire, or 
-	// change the ones you have, to get the center button working!
-	
-	// <TBD>  Student code here
+	// Configure the joystick button pin (PD0 / INT0) as an input
+	DDRD &= ~(1 << DDD0); 
 	
 	// Interrupt Enable Block
-	// Using your Lab05 code, you will need to update these
-	// lines from 0x00 to have the appropriate mask.
-	EICRA = 0x00;  // <TBD> Needs to be updated!
-	EIMSK = 0x00;  // <TBD> Needs to be updated!
+	// Configure INT0 to trigger on the rising edge (releasing the center joystick pushbutton)
+	EICRA = (1<<ISC01) | (1<<ISC00);  
+	EIMSK = (1<<INT0);                 // Enable External Interrupt 0[cite: 6]
+	
 	// Enable Global Interrupts
 	sei();
 	
-	// Main Loop
+	// Main Loop (Game Loop)
 	while (1) {
-		// Your game loop will go here.
-		
-		// <TBD>  Game Loop
-		
+		// Wait until Tick reaches 50ms interval
+		if (Tick >= 50) {
+			Tick = 0; // Reset tick counter
+			
+			// Reset pattern position and direction if Mode changed
+			if (last_mode != Mode) {
+				last_mode = Mode;
+				current_led = (Mode == HighToLow) ? 7 : 0;
+				step_dir = 1;
+			}
+			
+			// Execute pattern logic based on current Mode
+			switch (Mode) {
+				case LowToHigh:
+					LEDS = ~(1 << current_led); // Turn on single LED active-low
+					current_led++;
+					if (current_led > 7) {
+						current_led = 0;
+					}
+					break;
+					
+				case HighToLow:
+					LEDS = ~(1 << current_led);
+					if (current_led == 0) {
+						current_led = 7;
+					} else {
+						current_led--;
+					}
+					break;
+					
+				case BackAndForth:
+					LEDS = ~(1 << current_led);
+					if (current_led == 7) {
+						step_dir = -1;
+					} else if (current_led == 0) {
+						step_dir = 1;
+					}
+					current_led += step_dir;
+					break;
+					
+				case BonusPattern:
+					// Bonus pattern: Nibble / pair scanning back and forth
+					{
+						static unsigned char bonus_state = 0;
+						if (bonus_state == 0) {
+							LEDS = ~(0x03); // Pins A0, A1 ON
+							bonus_state = 1;
+						} else if (bonus_state == 1) {
+							LEDS = ~(0x0C); // Pins A2, A3 ON
+							bonus_state = 2;
+						} else if (bonus_state == 2) {
+							LEDS = ~(0x30); // Pins A4, A5 ON
+							bonus_state = 3;
+						} else {
+							LEDS = ~(0xC0); // Pins A6, A7 ON
+							bonus_state = 0;
+						}
+					}
+					break;
+			}
+		}
 	}
 }
 
-// This is the required format of an ISR routine for a 
-// Timer.  Your ISR code should go inside
-// (Prof Note:  When you define this correctly, the JUMP TABLE
-//  will be properly updated by the compiler.  (Thank you 
+// Timer0 overflow ISR triggered every 1ms
 ISR(TIMER0_OVF_vect){
-	
-	// <TBD>  ISR code for timer interrupt.
-	
+	TCNT0 = TCNT0_COUNT_SET; // Reload initial count value for 1ms interval[cite: 6]
+	Tick++;                  // Increment millisecond tick counter[cite: 5, 7]
 }
 
-// This is the required format of an ISR routine for a
-// Hardware Pin Interupt.  Format is "PIN#_vect" where 
-// '#' is the number of the interupt...  PD0->0, PD1->1, etc
+// Hardware Pin Interrupt ISR for INT0 (triggered when center joystick button is released)
 ISR(INT0_vect){
-	
-	// <TBD>  
-	
+	// Cycle through the four pattern modes (0 -> 1 -> 2 -> 3 -> 0)[cite: 6]
+	if (Mode == LowToHigh) {
+		Mode = HighToLow;
+	} else if (Mode == HighToLow) {
+		Mode = BackAndForth;
+	} else if (Mode == BackAndForth) {
+		Mode = BonusPattern;
+	} else {
+		Mode = LowToHigh;
+	}
 }
